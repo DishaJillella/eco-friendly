@@ -118,6 +118,29 @@ describe("task routes", () => {
 
     expect(response.statusCode).toBe(422);
     expect(response.headers["content-type"]).toContain("application/problem+json");
+    expect(response.json()).toMatchObject({
+      status: 422,
+      title: "Unprocessable Entity",
+      detail: "Task query is invalid",
+      instance: "/tasks?status=blocked"
+    });
+    expect(response.json().errors.status).toContain(
+      'Invalid option: expected one of "todo"|"in_progress"|"done"'
+    );
+  });
+
+  it("rejects unknown status filter parameters", async () => {
+    const { app } = await setup();
+
+    const response = await app.inject({ method: "GET", url: "/tasks?status=todo&owner=me" });
+
+    expect(response.statusCode).toBe(422);
+    expect(response.headers["content-type"]).toContain("application/problem+json");
+    expect(response.json()).toMatchObject({
+      status: 422,
+      detail: "Task query is invalid",
+      instance: "/tasks?status=todo&owner=me"
+    });
   });
 
   it("partially updates a task and preserves omitted fields", async () => {
@@ -193,6 +216,63 @@ describe("task routes", () => {
     expect(tasks.json()[0]).toMatchObject({ id, title: "Keep me", status: "todo" });
   });
 
+  it("rejects patch payloads with blank titles, invalid dates, and unknown fields", async () => {
+    const { app } = await setup();
+    const created = await app.inject({
+      method: "POST",
+      url: "/tasks",
+      payload: { title: "Validate patch" }
+    });
+    const id = created.json().id;
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: `/tasks/${id}`,
+      payload: { title: "   ", due_date: "2026-02-31", extra: true }
+    });
+    const tasks = await app.inject({ method: "GET", url: "/tasks" });
+
+    expect(response.statusCode).toBe(422);
+    expect(response.headers["content-type"]).toContain("application/problem+json");
+    expect(response.json()).toMatchObject({
+      status: 422,
+      detail: "Task patch is invalid",
+      instance: `/tasks/${id}`
+    });
+    expect(response.json().errors.title).toContain("Title is required");
+    expect(response.json().errors.due_date).toContain("Must be a valid calendar date");
+    expect(response.json().errors.body).toContain("Unrecognized key: \"extra\"");
+    expect(tasks.json()[0]).toMatchObject({ id, title: "Validate patch", due_date: null });
+  });
+
+  it("clears nullable patch fields and preserves other fields", async () => {
+    const { app } = await setup();
+    const created = await app.inject({
+      method: "POST",
+      url: "/tasks",
+      payload: {
+        title: "Clear fields",
+        description: "Remove this",
+        due_date: "2026-06-15"
+      }
+    });
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: `/tasks/${created.json().id}`,
+      payload: { description: null, due_date: null }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      title: "Clear fields",
+      description: null,
+      due_date: null,
+      status: "todo",
+      priority: "med"
+    });
+  });
+
   it("returns not found for missing patch targets", async () => {
     const { app } = await setup();
 
@@ -242,5 +322,31 @@ describe("task routes", () => {
 
     expect(response.statusCode).toBe(400);
     expect(response.headers["content-type"]).toContain("application/problem+json");
+    expect(response.json()).toMatchObject({
+      status: 400,
+      title: "Bad Request",
+      detail: "Request body must be valid JSON",
+      instance: "/tasks"
+    });
+  });
+
+  it("returns a generic 500 response for unexpected route errors", async () => {
+    const app = await buildApp({
+      create: async () => {
+        throw new Error("database unavailable");
+      },
+      list: async () => [],
+      update: async () => null,
+      delete: async () => false
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/tasks",
+      payload: { title: "Trigger failure" }
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toEqual({ error: "Internal Server Error" });
   });
 });
